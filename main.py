@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # Global variables for web dashboard
 start_time = time.time()
-bot_username = "movionfire_bot"
+bot_username = "xaiomovie_bot"
 # Global variable to store bot application instance for webhook
 bot_app = None
 bot_loop = None
@@ -605,29 +605,16 @@ class Database:
         next_pos = result['next_pos'] if result else 0
         
         try:
-            # Get old invite link for logging (if channel already exists)
-            old_row = await self.fetchrow(
-                "SELECT invite_link FROM required_channels WHERE channel_username = %s", (clean_username,)
-            )
-            old_link = old_row['invite_link'] if old_row else None
-            
             await self.execute_and_commit('''
                 INSERT INTO required_channels (channel_username, channel_name, channel_type, invite_link, added_by, position, is_active)
                 VALUES (%s, %s, %s, %s, %s, %s, 1)
                 ON CONFLICT (channel_username) DO UPDATE
                 SET is_active = 1,
                     channel_type = COALESCE(EXCLUDED.channel_type, required_channels.channel_type),
-                    invite_link = EXCLUDED.invite_link,
+                    invite_link = CASE WHEN EXCLUDED.invite_link IS NULL THEN NULL ELSE EXCLUDED.invite_link END,
                     added_by = EXCLUDED.added_by,
                     channel_name = COALESCE(EXCLUDED.channel_name, required_channels.channel_name)
             ''', (clean_username, friendly_name, channel_type, invite_link, added_by, next_pos))
-            
-            # Verify the link was actually saved
-            if invite_link and old_link:
-                if old_link != invite_link:
-                    log.info(f"🔄 Invite link UPDATED for {clean_username}: old={old_link[:30]}... → new={invite_link[:30]}...")
-                else:
-                    log.warning(f"⚠️ Invite link unchanged for {clean_username}: {invite_link[:30]}...")
             
             log.info(f"Channel added: @{clean_username} as '{friendly_name}' (type: {channel_type}) by user {added_by}")
             return True
@@ -1291,6 +1278,7 @@ async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id:
             log.info(f"Scheduled fallback deletion of message {message_id} in {DELETE_AFTER} seconds")
     except Exception as e:
         log.error(f"Failed to schedule deletion: {e}")
+
 
 def is_group_share_key(key: str) -> bool:
     """Return True when a /start key points to a grouped upload."""
@@ -2747,40 +2735,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             for channel_data in active_channels:
                 channel = normalize_channel_username(channel_data['channel_username'])
-                channel_name = channel_data['channel_name'] or "Channel"
+                channel_name = channel_data['channel_name'] or f"Channel"
                 channel_type = channel_data.get('channel_type', 'public')
-                if channel_type == 'private':
-                    invite_url = channel_data.get('invite_link')
-                    if not invite_url:
-                        try:
-                            ch_ref = telegram_chat_ref(channel)
-                            if ch_ref:
-                                new_inv = await context.bot.create_chat_invite_link(
-                                    chat_id=ch_ref,
-                                    creates_join_request=True
-                                )
-                                invite_url = new_inv.invite_link
-                                await db.execute_and_commit(
-                                    "UPDATE required_channels SET invite_link = %s WHERE channel_username = %s",
-                                    (invite_url, channel)
-                                )
-                                log.info(f"Auto-healed missing invite link for welcome {channel}")
-                        except Exception as e:
-                            log.error(f"Failed to auto-heal welcome invite link for {channel}: {e}")
 
-                    if invite_url:
-                        keyboard.append([InlineKeyboardButton(
-                            f"📢 Join {channel_name}", 
-                            url=invite_url
-                        )])
-                    else:
-                        keyboard.append([InlineKeyboardButton(
-                            f"❌ {channel_name} (Contact Admin)", 
-                            callback_data="noop"
-                        )])
+                if channel_type == 'private' and channel_data.get('invite_link'):
+                    keyboard.append([InlineKeyboardButton(
+                        f"📢 Join {channel_name}",
+                        url=channel_data['invite_link']
+                    )])
                 else:
                     keyboard.append([InlineKeyboardButton(
-                        f"📢 Join {channel_name}", 
+                        f"📢 Join {channel_name}",
                         url=f"https://t.me/{channel}"
                     )])
 
@@ -2854,33 +2819,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "SELECT invite_link FROM required_channels WHERE channel_username = %s",
                         (channel,)
                     )
-                    invite_url = channel_data['invite_link'] if channel_data and channel_data.get('invite_link') else None
-                    if not invite_url:
-                        try:
-                            ch_ref = telegram_chat_ref(channel)
-                            if ch_ref:
-                                new_inv = await context.bot.create_chat_invite_link(
-                                    chat_id=ch_ref,
-                                    creates_join_request=True
-                                )
-                                invite_url = new_inv.invite_link
-                                await db.execute_and_commit(
-                                    "UPDATE required_channels SET invite_link = %s WHERE channel_username = %s",
-                                    (invite_url, channel)
-                                )
-                                log.info(f"Auto-healed missing invite link for {channel}")
-                        except Exception as e:
-                            log.error(f"Failed to auto-heal invite link for {channel}: {e}")
-
-                    if invite_url:
+                    if channel_data and channel_data['invite_link']:
                         keyboard.append([InlineKeyboardButton(
-                            f"📢 Join {channel_name}", 
-                            url=invite_url
+                            f"📢 Join {channel_name}",
+                            url=channel_data['invite_link']
                         )])
                     else:
                         log.error(f"No invite link found for private channel: {channel}")
                         keyboard.append([InlineKeyboardButton(
-                            f"❌ {channel_name} (Contact Admin)", 
+                            f"❌ {channel_name} (Contact Admin)",
                             callback_data="noop"
                         )])
                 else:
@@ -3624,8 +3571,7 @@ async def listchannels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"/addchannel - Add channel (reply to forwarded message for private)\n"
     msg += f"/approve - Approve pending requests (reply to forwarded message)\n"
     msg += f"/removechannel @channel - Remove channel\n"
-    msg += f"/testchannels - Test bot access to all channels\n"
-    msg += f"/refreshlinks - Force refresh all private channel invite links"
+    msg += f"/testchannels - Test bot access to all channels"
     
     sent_msg = await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
     await schedule_message_deletion(context, sent_msg.chat_id, sent_msg.message_id)
@@ -3677,132 +3623,6 @@ async def testchannels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result_text = "🔍 *Channel Access Test*\n\n" + "\n".join(results)
     
     await status_msg.edit_text(result_text, parse_mode="Markdown")
-    await schedule_message_deletion(context, status_msg.chat_id, status_msg.message_id)
-
-
-async def refresh_all_private_channel_links(bot, specific_channel_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Regenerate fresh join-request invite links directly from Telegram for all active private channels and update the DB."""
-    channels_data = await db.get_channels_with_details()
-    active_private = [
-        c for c in channels_data
-        if c['is_active'] == 1 and c.get('channel_type') == 'private'
-    ]
-    if specific_channel_id:
-        target = str(specific_channel_id).strip()
-        active_private = [
-            c for c in active_private
-            if str(c['channel_username']).strip() == target or str(c['id']).strip() == target
-        ]
-
-    results = []
-    for ch in active_private:
-        channel_user = ch['channel_username']
-        channel_name = ch['channel_name'] or channel_user
-        channel_ref = telegram_chat_ref(channel_user)
-
-        if channel_ref is None:
-            results.append({
-                "channel_name": channel_name,
-                "channel_username": channel_user,
-                "success": False,
-                "error": "Invalid channel identifier"
-            })
-            continue
-
-        try:
-            # 1. Verify bot is admin with required permissions
-            member = await bot.get_chat_member(channel_ref, bot.id)
-            if member.status not in ["administrator", "creator"]:
-                results.append({
-                    "channel_name": channel_name,
-                    "channel_username": channel_user,
-                    "success": False,
-                    "error": f"Bot is not admin (status: {member.status}). Make bot admin!"
-                })
-                continue
-
-            if hasattr(member, 'can_invite_users') and not member.can_invite_users:
-                results.append({
-                    "channel_name": channel_name,
-                    "channel_username": channel_user,
-                    "success": False,
-                    "error": "Bot lacks 'Invite Users via Link' admin permission!"
-                })
-                continue
-
-            # 2. Always create a brand-new unique link from Telegram
-            invite_obj = await bot.create_chat_invite_link(
-                chat_id=channel_ref,
-                creates_join_request=True
-            )
-            new_link = invite_obj.invite_link
-            old_link = ch.get('invite_link')
-
-            # 3. Save to database
-            await db.execute_and_commit(
-                "UPDATE required_channels SET invite_link = %s WHERE channel_username = %s",
-                (new_link, channel_user)
-            )
-            log.info(f"✅ Refreshed invite link for {channel_name} ({channel_user}): {new_link}")
-
-            results.append({
-                "channel_name": channel_name,
-                "channel_username": channel_user,
-                "success": True,
-                "old_link": old_link,
-                "new_link": new_link
-            })
-        except Exception as e:
-            log.error(f"Failed to refresh link for {channel_name} ({channel_user}): {e}", exc_info=True)
-            results.append({
-                "channel_name": channel_name,
-                "channel_username": channel_user,
-                "success": False,
-                "error": str(e)
-            })
-
-    return results
-
-
-async def refreshlinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to force-regenerate fresh invite links for all active private channels."""
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    status_msg = await update.message.reply_text("🔄 *Refreshing private channel invite links from Telegram...*", parse_mode="Markdown")
-
-    specific_id = context.args[0] if context.args else None
-    results = await refresh_all_private_channel_links(context.bot, specific_id)
-
-    if not results:
-        sent = await status_msg.edit_text("ℹ️ *No active private channels found in database.*", parse_mode="Markdown")
-        await schedule_message_deletion(context, status_msg.chat_id, status_msg.message_id)
-        return
-
-    lines = ["📋 *Private Channel Link Refresh Results:*\n"]
-    success_count = 0
-    fail_count = 0
-
-    for r in results:
-        name = escape_markdown(r['channel_name'])
-        username = escape_markdown(str(r['channel_username']))
-        if r['success']:
-            success_count += 1
-            lines.append(f"✅ *{name}* (`{username}`):\n🔗 [Click to Test Fresh Link]({r['new_link']})\n")
-        else:
-            fail_count += 1
-            err = escape_markdown(r['error'])
-            lines.append(f"❌ *{name}* (`{username}`):\n⚠️ *Error:* `{err}`\n")
-
-    lines.append(f"📊 *Summary:* {success_count} refreshed, {fail_count} failed")
-    if success_count > 0:
-        lines.append("💾 *Database updated successfully!* Users will now get these new working links.")
-
-    text = "\n".join(lines)
-    if len(text) > 4000:
-        text = text[:4000] + "\n...(truncated)"
-
-    await status_msg.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
     await schedule_message_deletion(context, status_msg.chat_id, status_msg.message_id)
 
 # ============ EXISTING COMMAND HANDLERS ============
@@ -4837,17 +4657,12 @@ async def import_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     success_msg += f"📋 *Metadata:* JSON file was included in backup\n"
                 
                 success_msg += f"\n💡 *Next steps:*\n"
-                # Auto-refresh all private channel links so backup doesn't restore dead/expired links
-                try:
-                    refreshed = await refresh_all_private_channel_links(context.bot)
-                    if refreshed:
-                        success_msg += f"\n🔄 *Auto-Refreshed {len(refreshed)} Private Channel Link(s):*\n"
-                        for rf in refreshed:
-                            st = "✅" if rf['success'] else "❌"
-                            success_msg += f"{st} {rf['channel_name']}\n"
-                except Exception as rf_err:
-                    log.error(f"Error auto-refreshing links after import: {rf_err}")
-
+                success_msg += f"• Run `/stats` to verify data\n"
+                success_msg += f"• Run `/listchannels` to check channels\n"
+                success_msg += f"• Broadcast will work with all restored users! ✅\n\n"
+                success_msg += f"⚠️ *Remember:* Your database will still expire. Run `/backup` regularly!\n"
+                success_msg += f"📅 Auto-backup runs every 3 days"
+                
                 await query.edit_message_text(success_msg)
                 
                 await context.bot.send_message(
@@ -5061,7 +4876,6 @@ async def initialize_bot():
     application.add_handler(CommandHandler("removechannel", removechannel))
     application.add_handler(CommandHandler("listchannels", listchannels))
     application.add_handler(CommandHandler("testchannels", testchannels))
-    application.add_handler(CommandHandler("refreshlinks", refreshlinks))
     
     # Backup and import commands
     application.add_handler(CommandHandler("backup", backup_command))
