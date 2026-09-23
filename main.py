@@ -3025,10 +3025,32 @@ async def addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await schedule_message_deletion(context, sent_msg.chat_id, sent_msg.message_id)
                         return
                     
-                    # Create invite link (no expiry)
+                    # Revoke old invite link if one exists in DB (handles re-add scenario)
+                    clean_channel_id = normalize_channel_username(channel_id)
+                    old_row = await db.fetchrow(
+                        "SELECT invite_link FROM required_channels WHERE channel_username = %s AND invite_link IS NOT NULL",
+                        (clean_channel_id,)
+                    )
+                    if old_row and old_row['invite_link']:
+                        try:
+                            await context.bot.revoke_chat_invite_link(
+                                chat_id=channel_ref,
+                                invite_link=old_row['invite_link']
+                            )
+                            log.info(f"🔗 Revoked old invite link for channel {channel_id} during re-add")
+                        except Exception as e:
+                            log.warning(f"Could not revoke old invite link during re-add: {e}")
+                        # Clear old link from DB immediately
+                        await db.execute_and_commit(
+                            "UPDATE required_channels SET invite_link = NULL WHERE channel_username = %s",
+                            (clean_channel_id,)
+                        )
+                    
+                    # Create fresh invite link (no expiry)
                     invite_link = await context.bot.create_chat_invite_link(
                         chat_id=channel_ref,
-                        creates_join_request=True
+                        creates_join_request=True,
+                        name=f"Bot Force Join Link"
                     )
                     
                     # Save to database
