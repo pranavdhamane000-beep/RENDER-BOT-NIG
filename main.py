@@ -605,16 +605,29 @@ class Database:
         next_pos = result['next_pos'] if result else 0
         
         try:
+            # Get old invite link for logging (if channel already exists)
+            old_row = await self.fetchrow(
+                "SELECT invite_link FROM required_channels WHERE channel_username = %s", (clean_username,)
+            )
+            old_link = old_row['invite_link'] if old_row else None
+            
             await self.execute_and_commit('''
                 INSERT INTO required_channels (channel_username, channel_name, channel_type, invite_link, added_by, position, is_active)
                 VALUES (%s, %s, %s, %s, %s, %s, 1)
                 ON CONFLICT (channel_username) DO UPDATE
                 SET is_active = 1,
                     channel_type = COALESCE(EXCLUDED.channel_type, required_channels.channel_type),
-                    invite_link = COALESCE(EXCLUDED.invite_link, required_channels.invite_link),
+                    invite_link = EXCLUDED.invite_link,
                     added_by = EXCLUDED.added_by,
                     channel_name = COALESCE(EXCLUDED.channel_name, required_channels.channel_name)
             ''', (clean_username, friendly_name, channel_type, invite_link, added_by, next_pos))
+            
+            # Verify the link was actually saved
+            if invite_link and old_link:
+                if old_link != invite_link:
+                    log.info(f"🔄 Invite link UPDATED for {clean_username}: old={old_link[:30]}... → new={invite_link[:30]}...")
+                else:
+                    log.warning(f"⚠️ Invite link unchanged for {clean_username}: {invite_link[:30]}...")
             
             log.info(f"Channel added: @{clean_username} as '{friendly_name}' (type: {channel_type}) by user {added_by}")
             return True
